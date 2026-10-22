@@ -5,6 +5,14 @@ __pycache__/
 
 # C extensions
 *.so
+/Data
+/masks
+
+/unet_stack
+/unet_predictions
+/unet_gif
+access.txt
+.pylintrc
 
 # Distribution / packaging
 .Python
