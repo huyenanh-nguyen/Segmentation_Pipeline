@@ -15,6 +15,7 @@ access.txt
 .pylintrc
 /slurm_report
 /cellpose_training
+/Output
 # Distribution / packaging
 .Python
 build/
