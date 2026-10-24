@@ -54,7 +54,7 @@ class Background:
         channels: dict[int, str] = {}
 
         with nd2.ND2File(nd2_path) as nd2_file:
-            for index, channel in enumerate(nd2_file.metadata.channels):
+            for index, channel in enumerate(nd2_file.metadata.channels):# type: ignore[arg-type]
                 channels[index] = channel.channel.name
 
         return channels
@@ -134,7 +134,7 @@ class Background:
                 )
 
             user, fluorophore = self._parse_channel_name(channel_name)
-            exposure_ms = self.EXPOSURE_RULES.get((user, fluorophore))
+            exposure_ms = self.EXPOSURE_RULES.get((user, fluorophore))# type: ignore[arg-type]
 
             raw_minus_dark: np.ndarray | None = None
             if exposure_ms is not None:

@@ -13,7 +13,7 @@ __pycache__/
 /unet_gif
 access.txt
 .pylintrc
-
+/slurm_report
 # Distribution / packaging
 .Python
 build/
