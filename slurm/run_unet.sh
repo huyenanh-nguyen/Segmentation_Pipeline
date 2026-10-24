@@ -19,7 +19,7 @@ module load gpu/cuda/11.8
 
 # 2. Activate environment using full path
 
-source /u/hanguy/Segmentation_Pipeline/env/bin/activate/
+source /u/hanguy/Segmentation_Pipeline/env/bin/activate
 
 # 3. Run training script using full path
 

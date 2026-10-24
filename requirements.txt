@@ -1,3 +1,5 @@
+albucore==0.0.24
+albumentations==2.0.8
 annotated-types==0.8.0
 asttokens==3.0.2
 click==8.5.0
@@ -50,6 +52,7 @@ nvidia-nvshmem-cu13==3.4.5
 nvidia-nvtx==13.0.85
 ome-types==0.7.0
 opencv-python==5.0.0.93
+opencv-python-headless==5.0.0.93
 packaging==26.3
 pandas==3.0.6
 parso==0.8.7
@@ -71,9 +74,13 @@ python-dateutil==3.0.0
 PyYAML==6.0.3
 pyzmq==27.2.0
 resource-backed-dask-array==0.1.0
+roifile==2026.2.10
 scipy==1.17.1
+-e git+https://github.com/huyenanh-nguyen/Segmentation_Pipeline.git@6be12778505c9dc6a6785f55f3dfd7ec8385bb32#egg=segmentation_pipeline
+simsimd==6.5.16
 six==1.17.0
 stack-data==0.6.3
+stringzilla==5.3.1
 sympy==1.14.0
 tifffile==2026.3.3
 toolz==1.2.0
@@ -81,6 +88,7 @@ torch==2.14.1
 tornado==6.6
 traitlets==5.16.1
 triton==3.8.0
+typing==3.7.4.3
 typing-inspection==0.4.4
 typing_extensions==4.16.0
 tzdata==2026.5

@@ -27,8 +27,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 
-from  .DataProcessing.trainingsdataprocessing import Trainingpreperation
-from .DataProcessing.background import Background
+from  DataProcessing.trainingsdataprocessing import Trainingpreperation
+from DataProcessing.background import Background
 
 
 # ========================== Configuration =======================================
