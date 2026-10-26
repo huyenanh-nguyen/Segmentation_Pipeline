@@ -22,6 +22,6 @@ for _, file in enumerate(datapath):
         channel_idx=0,
         median_filter_size=21,
         cell_diameter=25,
-        output_folder= "Output",
+        output_folder= "Output_Watershed",
         output_name=f"{name}_channel_0_mask_50um",
     )
