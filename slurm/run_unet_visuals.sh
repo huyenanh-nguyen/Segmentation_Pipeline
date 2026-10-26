@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=UnetApplication
+#SBATCH --job-name=UnetVisuals
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:a100:1
 #SBATCH --cpus-per-task=8
@@ -23,4 +23,4 @@ source /u/hanguy/Segmentation_Pipeline/env/bin/activate
 
 # 3. Run training script using full path
 
-python /u/hanguy/Segmentation_Pipeline/unet_apply.py
+python /u/hanguy/Segmentation_Pipeline/unet_visuals.py

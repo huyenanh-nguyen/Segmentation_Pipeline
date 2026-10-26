@@ -9,8 +9,8 @@ import tifffile as tiff
 
 
 def stack_unet_instances_strict() -> None:
-    source_dir = Path("/u/hanguy/Segmentation_UI/unet_predictions")
-    output_dir = Path("/u/hanguy/Segmentation_UI/unet_stack")
+    source_dir = Path(str(Path.cwd()) + "/unet_predictions")
+    output_dir = Path(str(Path.cwd()) + "/unet_stack")
     
     output_dir.mkdir(parents=True, exist_ok=True)
     
@@ -67,8 +67,8 @@ def stack_unet_instances_strict() -> None:
     print(f"\nAll done! Stacks saved to: {output_dir}")
 
 
-if __name__ == "__main__":
-    stack_unet_instances_strict()
+
+stack_unet_instances_strict()
 
 
 # [turning tif into gif]
@@ -81,8 +81,8 @@ from PIL import Image
 
 def convert_tiff_stacks_to_gifs() -> None:
     # Define exact absolute paths
-    source_dir = Path("/u/hanguy/Segmentation_UI/unet_stack")
-    output_dir = Path("/u/hanguy/Segmentation_UI/unet_gif")
+    source_dir = Path(str(Path.cwd()) + "/unet_stack")
+    output_dir = Path(str(Path.cwd()) + "/unet_gif")
     
     # Create the output directory if it doesn't already exist
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -143,5 +143,5 @@ def convert_tiff_stacks_to_gifs() -> None:
     print(f"\nAll GIFs successfully created and saved to: {output_dir}")
 
 
-if __name__ == "__main__":
-    convert_tiff_stacks_to_gifs()
+
+convert_tiff_stacks_to_gifs()
