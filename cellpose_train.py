@@ -21,8 +21,8 @@ from scipy.ndimage import (
 )
 from scipy import ndimage as ndi
 from cellpose import models, io, train, metrics
-from training import Trainingpreperation
-from anhs_watershed import Background
+from  DataProcessing.trainingsdataprocessing import Trainingpreperation
+from DataProcessing.background import Background
 
 # [Generating Annotations Masks]_________________
 
