@@ -193,12 +193,21 @@ class SegmentationDataset(Dataset):
 
 class DoubleConv(nn.Module):
     def __init__(self, channels_in, channels_out):
+        """
+        Double Conv are two convolutional layers to extract more features of an image -> Conv2d extract features with a kernel filters and Batchnorm2d normalized the feature map
+        ReLu is the activation function and set negative value to zero.
+        Args:
+            channels_in (int): Network gets an image with 1 channels
+            channels_out (int): creates a feature map
+        """
         super().__init__()
         self.layers = nn.Sequential(
             nn.Conv2d(channels_in, channels_out, 3, padding=1, bias=False),
-            nn.BatchNorm2d(channels_out), nn.ReLU(inplace=True),
+            nn.BatchNorm2d(channels_out), 
+            nn.ReLU(inplace=True),
             nn.Conv2d(channels_out, channels_out, 3, padding=1, bias=False),
-            nn.BatchNorm2d(channels_out), nn.ReLU(inplace=True),
+            nn.BatchNorm2d(channels_out), 
+            nn.ReLU(inplace=True),
         )
 
     def forward(self, x):
@@ -207,11 +216,30 @@ class DoubleConv(nn.Module):
 
 class UNet(nn.Module):
     def __init__(self, base=BASE_CHANNELS):
+        """
+        e = encoder
+        u = upsampling
+        d = decoder
+        
+        e1 creates a 32 Feature Maps with 600 × 600 Pixeln.
+
+        self.pool(e1) reduce it to 300 × 300 Pixel.
+
+        self.e2(...) prosscessed the reduced feature map with another doubleconv.
+
+        encoder decreased the size the image smaller and decoder increased the size of the image.
+        Upsampling is matching the features from the encoder directly with the decoder, where the spatial information gets combined with the origin image structure.
+
+        Args:
+            base (_type_, optional): _description_. Defaults to BASE_CHANNELS.
+        """
         super().__init__()
-        self.e1, self.e2 = DoubleConv(1, base), DoubleConv(base, base * 2)
-        self.e3, self.e4 = DoubleConv(base * 2, base * 4), DoubleConv(base * 4, base * 8)
-        self.pool = nn.MaxPool2d(2)
-        self.b = DoubleConv(base * 8, base * 16)
+        self.e1 = DoubleConv(1, base)
+        self.e2 = DoubleConv(base, base * 2)
+        self.e3 = DoubleConv(base * 2, base * 4)
+        self.e4 = DoubleConv(base * 4, base * 8)
+        self.pool = nn.MaxPool2d(2) # reduce spatial resolution by the factor 2 -> 600x600 to 300x300
+        self.b = DoubleConv(base * 8, base * 16) # b = bottleneck of the Unet -> smallest resolution but most features channels
         self.u4, self.d4 = nn.ConvTranspose2d(base * 16, base * 8, 2, 2), DoubleConv(base * 16, base * 8)
         self.u3, self.d3 = nn.ConvTranspose2d(base * 8, base * 4, 2, 2), DoubleConv(base * 8, base * 4)
         self.u2, self.d2 = nn.ConvTranspose2d(base * 4, base * 2, 2, 2), DoubleConv(base * 4, base * 2)
@@ -220,12 +248,26 @@ class UNet(nn.Module):
 
     @staticmethod
     def resize(x, reference):
+        """
+        bilinear is an interpolation method to upsample/upscaling the image from the bottleneck to the original size, to reduce artefacts
+
+        Args:
+            x (_type_): _description_
+            reference (_type_): _description_
+
+        Returns:
+            _type_: _description_
+        """
         return F.interpolate(x, size=reference.shape[-2:], mode="bilinear", align_corners=False) if x.shape[-2:] != reference.shape[-2:] else x
 
     def forward(self, x):
+        """
+        d4 to d1 is the part where connections are getting skipped -> includes the information into the decoder.
+        torch.cat([..], dim = 1) adds two tensors along the channel dimension, where both tensors has to have the same spatial size.
+        """
         e1 = self.e1(x); e2 = self.e2(self.pool(e1)); e3 = self.e3(self.pool(e2)); e4 = self.e4(self.pool(e3))
-        b = self.b(self.pool(e4))
-        d4 = self.d4(torch.cat([e4, self.resize(self.u4(b), e4)], dim=1))
+        b = self.b(self.pool(e4)) 
+        d4 = self.d4(torch.cat([e4, self.resize(self.u4(b), e4)], dim=1)) 
         d3 = self.d3(torch.cat([e3, self.resize(self.u3(d4), e3)], dim=1))
         d2 = self.d2(torch.cat([e2, self.resize(self.u2(d3), e2)], dim=1))
         d1 = self.d1(torch.cat([e1, self.resize(self.u1(d2), e1)], dim=1))

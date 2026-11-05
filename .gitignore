@@ -16,6 +16,7 @@ access.txt
 /slurm_report
 /cellpose_training
 /Output
+/cellpose_models
 # Distribution / packaging
 .Python
 build/
