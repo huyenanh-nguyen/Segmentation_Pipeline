@@ -244,7 +244,7 @@ class UNet(nn.Module):
         self.u3, self.d3 = nn.ConvTranspose2d(base * 8, base * 4, 2, 2), DoubleConv(base * 8, base * 4)
         self.u2, self.d2 = nn.ConvTranspose2d(base * 4, base * 2, 2, 2), DoubleConv(base * 4, base * 2)
         self.u1, self.d1 = nn.ConvTranspose2d(base * 2, base, 2, 2), DoubleConv(base * 2, base)
-        self.out = nn.Conv2d(base, 1, 1)
+        self.out = nn.Conv2d(base, 1, 1) # one output channel
 
     @staticmethod
     def resize(x, reference):
@@ -271,7 +271,7 @@ class UNet(nn.Module):
         d3 = self.d3(torch.cat([e3, self.resize(self.u3(d4), e3)], dim=1))
         d2 = self.d2(torch.cat([e2, self.resize(self.u2(d3), e2)], dim=1))
         d1 = self.d1(torch.cat([e1, self.resize(self.u1(d2), e1)], dim=1))
-        return self.out(d1)  # logits, no sigmoid here
+        return self.out(d1)  # -> getting one outputs, one is for cellprobability (only logits, no sigmoidal)
 
 
 def dice_loss(logits, target, eps=1e-6):
@@ -324,7 +324,7 @@ for epoch in range(1, EPOCHS + 1):
         images, masks = images.to(device), masks.to(device)
         optimizer.zero_grad(set_to_none=True)
         loss = loss_function(model(images), masks)
-        loss.backward()
+        loss.backward() #backpropagation
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         running_loss += loss.item() * images.size(0)
