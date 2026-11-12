@@ -10,6 +10,9 @@ __pycache__/
 pyproject.toml
 /unet_stack
 /unet_predictions
+unet_instance_gif/
+unet_instance_stack/
+unet_predictions_watershed/
 /unet_gif
 access.txt
 .pylintrc
