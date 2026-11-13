@@ -74,6 +74,9 @@ PREDICTION_DIR = MODEL_DIR / "instance_predictions"
 CELL_THRESHOLD = 0.50
 MIN_DISTANCE = 12
 BOUNDARY_WEIGHT = 2.0
+BOUNDARY_THRESHOLD = 0.55
+BOUNDARY_SMOOTHING = 0.8
+
 
 # Weight of boundary loss relative to cell loss.
 BOUNDARY_LOSS_WEIGHT = 1.0
@@ -83,6 +86,7 @@ SAVE_TEST_PREDICTIONS = True
 
 # Number of workers: 0 is safest for cluster/MPS and custom project objects.
 NUM_WORKERS = 0
+
 
 
 # =============================================================================
@@ -617,18 +621,25 @@ def loss_function(
 # =============================================================================
 
 
+
 def watershed_instances(
     cell_probability,
     boundary_probability,
     cell_threshold=CELL_THRESHOLD,
     min_distance=MIN_DISTANCE,
-    boundary_weight=BOUNDARY_WEIGHT
+    boundary_weight=BOUNDARY_WEIGHT,
+    boundary_threshold=0.55,
+    boundary_smoothing=0.8
 ):
     """
-    Convert the two U-Net probability maps into an integer instance-label map.
+    Convert U-Net probability maps into instance labels.
 
-    Returns:
-        int32 array, background=0, instances=1,2,3,...
+    Watershed regions are merged again if the predicted boundary
+    between them is too weak.
+
+    boundary_threshold:
+        Minimum mean boundary probability required to keep
+        two neighbouring watershed regions separate.
     """
 
     cell_probability = np.asarray(
@@ -639,30 +650,30 @@ def watershed_instances(
     )
 
     if cell_probability.shape != boundary_probability.shape:
-        raise ValueError(
-            "Cell and boundary probability maps must have same shape."
-        )
+        raise ValueError("Probability maps must have identical shapes.")
 
-    # 1. Threshold cell probability
+    # 1. Detect foreground
     foreground = cell_probability >= cell_threshold
-    foreground = np.asarray(foreground, dtype=bool)
 
     if not np.any(foreground):
         return np.zeros(foreground.shape, dtype=np.int32)
 
-    # 2. Compute distance transform
-    distance = np.asarray(
-        ndi.distance_transform_edt(foreground),
-        dtype=np.float32
+    # 2. Smooth boundary predictions slightly
+    smooth_boundary = ndi.gaussian_filter(
+        boundary_probability,
+        sigma=boundary_smoothing
     )
 
-    # 3. Construct watershed elevation
+    # 3. Distance transform
+    distance = ndi.distance_transform_edt(foreground).astype(np.float32)
+
+    # 4. Watershed elevation
     elevation = (
         -distance
-        + boundary_weight * boundary_probability
+        + boundary_weight * smooth_boundary
     )
 
-    # 4. Find local maxima as candidate cell centres
+    # 5. Find candidate cell centres
     coordinates = peak_local_max(
         distance,
         labels=foreground.astype(np.uint8),
@@ -670,31 +681,147 @@ def watershed_instances(
         exclude_border=False
     )
 
-    # 5. Create marker image
-    markers_image = np.zeros(
-        foreground.shape,
-        dtype=np.int32
-    )
+    markers_image = np.zeros(foreground.shape, dtype=np.int32)
 
     for marker_id, (row, col) in enumerate(coordinates, start=1):
         markers_image[row, col] = marker_id
 
-    # 6. Fallback if no local maxima were found
+    # Fallback if no markers were found
     if markers_image.max() == 0:
         markers_image, num_features = ndi.label(foreground)
 
         if num_features == 0:
             return np.zeros(foreground.shape, dtype=np.int32)
 
-    # 7. Watershed segmentation
+    # 6. Initial watershed segmentation
+    # watershed_line=False allows us to inspect the interface
+    # between neighbouring regions.
     labels = watershed(
         elevation,
         markers=markers_image,
         mask=foreground,
-        watershed_line=True
+        watershed_line=False
+    ).astype(np.int32)
+
+    # ---------------------------------------------------------
+    # 7. Check whether neighbouring regions have real boundaries
+    # ---------------------------------------------------------
+
+    max_label = int(labels.max())
+
+    if max_label <= 1:
+        return labels
+
+    parent = np.arange(max_label + 1, dtype=np.int32)
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        root_a = find(int(a))
+        root_b = find(int(b))
+
+        if root_a != root_b:
+            parent[root_b] = root_a
+
+    # Collect interfaces between neighbouring watershed regions
+    all_pairs = []
+    all_scores = []
+
+    # Horizontal neighbours
+    left = labels[:, :-1]
+    right = labels[:, 1:]
+
+    valid = (
+        (left > 0)
+        & (right > 0)
+        & (left != right)
     )
 
-    return labels.astype(np.int32)
+    if np.any(valid):
+        pairs = np.sort(
+            np.stack((left[valid], right[valid]), axis=1),
+            axis=1
+        )
+
+        scores = np.maximum(
+            smooth_boundary[:, :-1][valid],
+            smooth_boundary[:, 1:][valid]
+        )
+
+        all_pairs.append(pairs)
+        all_scores.append(scores)
+
+    # Vertical neighbours
+    upper = labels[:-1, :]
+    lower = labels[1:, :]
+
+    valid = (
+        (upper > 0)
+        & (lower > 0)
+        & (upper != lower)
+    )
+
+    if np.any(valid):
+        pairs = np.sort(
+            np.stack((upper[valid], lower[valid]), axis=1),
+            axis=1
+        )
+
+        scores = np.maximum(
+            smooth_boundary[:-1, :][valid],
+            smooth_boundary[1:, :][valid]
+        )
+
+        all_pairs.append(pairs)
+        all_scores.append(scores)
+
+    # 8. Merge regions with insufficient boundary evidence
+    if all_pairs:
+        pairs = np.concatenate(all_pairs, axis=0)
+        scores = np.concatenate(all_scores, axis=0)
+
+        unique_pairs, inverse = np.unique(
+            pairs,
+            axis=0,
+            return_inverse=True
+        )
+
+        score_sums = np.bincount(
+            inverse,
+            weights=scores
+        )
+
+        score_counts = np.bincount(inverse)
+
+        mean_boundary = score_sums / np.maximum(score_counts, 1)
+
+        for (label_a, label_b), boundary_strength in zip(
+            unique_pairs, mean_boundary
+        ):
+            if boundary_strength < boundary_threshold:
+                union(label_a, label_b)
+
+    # 9. Reconstruct compact instance IDs
+    root_labels = np.array(
+        [find(i) for i in range(max_label + 1)],
+        dtype=np.int32
+    )
+
+    merged = root_labels[labels]
+
+    unique_labels, compact_labels = np.unique(
+        merged,
+        return_inverse=True
+    )
+
+    result = compact_labels.reshape(labels.shape).astype(np.int32)
+
+    return result
+
 
 
 
@@ -807,6 +934,7 @@ def semantic_dice(true_mask, pred_mask, eps=1e-6):
 # Prediction helper
 # =============================================================================
 
+
 @torch.no_grad()
 def predict_instance_mask(model, image_tensor):
     model.eval()
@@ -814,20 +942,36 @@ def predict_instance_mask(model, image_tensor):
     image_tensor = image_tensor.to(device)
     logits = model(image_tensor)
 
-    cell_probability = torch.sigmoid(logits[0, 0]).cpu().numpy()
-    boundary_probability = torch.sigmoid(logits[0, 1]).cpu().numpy()
+    cell_probability = torch.sigmoid(
+        logits[0, 0]
+    ).cpu().numpy()
+
+    boundary_probability = torch.sigmoid(
+        logits[0, 1]
+    ).cpu().numpy()
 
     instance_prediction = watershed_instances(
         cell_probability,
-        boundary_probability
+        boundary_probability,
+        cell_threshold=CELL_THRESHOLD,
+        min_distance=MIN_DISTANCE,
+        boundary_weight=BOUNDARY_WEIGHT,
+        boundary_threshold=BOUNDARY_THRESHOLD,
+        boundary_smoothing=BOUNDARY_SMOOTHING
     )
 
-    return cell_probability, boundary_probability, instance_prediction
+    return (
+        cell_probability,
+        boundary_probability,
+        instance_prediction
+    )
+
 
 
 # =============================================================================
 # Evaluation
 # =============================================================================
+
 
 @torch.no_grad()
 def evaluate(model, loader):
@@ -841,6 +985,7 @@ def evaluate(model, loader):
     count = 0
 
     for images, cell_target, boundary_target, true_instances in loader:
+
         images = images.to(device)
         cell_target = cell_target.to(device)
         boundary_target = boundary_target.to(device)
@@ -856,6 +1001,7 @@ def evaluate(model, loader):
         batch_size = images.size(0)
 
         for batch_idx in range(batch_size):
+
             cell_probability = torch.sigmoid(
                 predictions[batch_idx, 0]
             ).cpu().numpy()
@@ -864,18 +1010,28 @@ def evaluate(model, loader):
                 predictions[batch_idx, 1]
             ).cpu().numpy()
 
+            # Watershed with boundary-confidence filtering
             predicted_instances = watershed_instances(
                 cell_probability,
-                boundary_probability
+                boundary_probability,
+                cell_threshold=CELL_THRESHOLD,
+                min_distance=MIN_DISTANCE,
+                boundary_weight=BOUNDARY_WEIGHT,
+                boundary_threshold=BOUNDARY_THRESHOLD,
+                boundary_smoothing=BOUNDARY_SMOOTHING
             )
 
-            true_instance_mask = true_instances[batch_idx].cpu().numpy()
+            true_instance_mask = (
+                true_instances[batch_idx].cpu().numpy()
+            )
 
+            # Semantic foreground Dice
             total_semantic_dice += semantic_dice(
                 true_instance_mask,
                 predicted_instances
             )
 
+            # Instance-level metrics
             metrics = instance_metrics(
                 true_instance_mask,
                 predicted_instances,
@@ -1144,7 +1300,9 @@ def main():
             "base_channels": BASE_CHANNELS,
             "cell_threshold": CELL_THRESHOLD,
             "min_distance": MIN_DISTANCE,
-            "boundary_weight": BOUNDARY_WEIGHT
+            "boundary_weight": BOUNDARY_WEIGHT,
+            "boundary_threshold": BOUNDARY_THRESHOLD,
+            "boundary_smoothing": BOUNDARY_SMOOTHING
         }
 
         torch.save(checkpoint, last_model_path)
