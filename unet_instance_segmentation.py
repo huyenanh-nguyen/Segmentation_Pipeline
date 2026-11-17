@@ -1244,8 +1244,8 @@ def main():
 
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-    best_model_path = MODEL_DIR / "unet_instance_best.pth"
-    last_model_path = MODEL_DIR / "unet_instance_last.pth"
+    best_model_path = MODEL_DIR / "unet_instance_best_pt2.pth"
+    last_model_path = MODEL_DIR / "unet_instance_last_pt2.pth"
 
     best_val_pq = -1.0
 

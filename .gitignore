@@ -13,10 +13,12 @@ pyproject.toml
 unet_instance_gif/
 unet_instance_stack/
 unet_predictions_watershed/
+temporal_unet_tracking_starter/
 /unet_gif
 access.txt
 .pylintrc
 /slurm_report
+unet_comparision/
 /cellpose_training
 /instance_predictions
 /Output

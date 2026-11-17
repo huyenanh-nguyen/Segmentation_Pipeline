@@ -2,13 +2,15 @@
 """Apply trained two-output U-Net + watershed to every ND2 frame.
 Run from the project root containing access.txt and DataProcessing/.
 """
+from skimage.feature import peak_local_max
+from skimage.segmentation import watershed
+import re
+from pathlib import Path
 import os
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "0"
 import csv
-import re
-from pathlib import Path
-from skimage.feature import peak_local_max
-from skimage.segmentation import watershed
+
+
 
 import matplotlib
 matplotlib.use("Agg")
@@ -38,7 +40,11 @@ MAX_COMPARISON_FIGURES = 12
 CELL_THRESHOLD_OVERRIDE = None
 MIN_DISTANCE_OVERRIDE = None
 BOUNDARY_WEIGHT_OVERRIDE = None
+BOUNDARY_THRESHOLD_OVERRIDE = None
+BOUNDARY_SMOOTHING_OVERRIDE = None
 
+BOUNDARY_THRESHOLD = 0.55
+BOUNDARY_SMOOTHING = 0.8
 BASE_CHANNELS = 32
 CELL_THRESHOLD = 0.5
 MIN_DISTANCE = 12
@@ -147,41 +153,53 @@ def watershed_instances(
     boundary_probability,
     cell_threshold=CELL_THRESHOLD,
     min_distance=MIN_DISTANCE,
-    boundary_weight=BOUNDARY_WEIGHT
+    boundary_weight=BOUNDARY_WEIGHT,
+    boundary_threshold=BOUNDARY_THRESHOLD,
+    boundary_smoothing=BOUNDARY_SMOOTHING,
 ):
     """
-    Convert the two U-Net probability maps into an integer instance-label map.
+    Convert U-Net cell and boundary probability maps into instance labels.
 
-    Steps:
-      1. Threshold cell probability to obtain foreground.
-      2. Compute distance transform inside the foreground.
-      3. Find local maxima as watershed markers.
-      4. Use negative distance plus predicted boundary probability as elevation.
-      5. Run watershed to obtain separate instance IDs.
-
-    Returns:
-        int32 array, background=0, instances=1,2,3,...
+    Weak predicted boundaries are merged after watershed segmentation.
+    Background = 0; instances = 1, 2, 3, ...
     """
+
     cell_probability = np.asarray(cell_probability, dtype=np.float32)
-    boundary_probability = np.asarray(boundary_probability, dtype=np.float32)
+    boundary_probability = np.asarray(
+        boundary_probability, dtype=np.float32
+    )
 
     if cell_probability.shape != boundary_probability.shape:
-        raise ValueError("Cell and boundary probability maps must have same shape.")
+        raise ValueError(
+            "Cell and boundary probability maps must have the same shape."
+        )
+
+    if cell_probability.ndim != 2:
+        raise ValueError("Probability maps must be 2D.")
+
+    if boundary_smoothing < 0:
+        raise ValueError("boundary_smoothing must be non-negative.")
 
     foreground = cell_probability >= cell_threshold
 
     if not np.any(foreground):
         return np.zeros(foreground.shape, dtype=np.int32)
 
-    # Smooth tiny holes in the foreground only very lightly; do not merge objects.
+    # Smooth the predicted boundary map.
+    smooth_boundary = ndi.gaussian_filter(
+        boundary_probability,
+        sigma=boundary_smoothing,
+    )
+
+    # Distance transform inside the foreground.
     distance = ndi.distance_transform_edt(foreground)
 
-    # Local maxima are candidate cell centres.
+    # Find candidate cell centres.
     coordinates = peak_local_max(
         distance,
         labels=foreground.astype(np.uint8),
         min_distance=max(1, int(min_distance)),
-        exclude_border=False
+        exclude_border=False,
     )
 
     markers_image = np.zeros(foreground.shape, dtype=np.int32)
@@ -189,22 +207,107 @@ def watershed_instances(
     for marker_id, (row, col) in enumerate(coordinates, start=1):
         markers_image[row, col] = marker_id
 
-    # Fallback for very small/thin foreground regions where no peak was found.
+    # Fallback if no local maxima were found.
     if markers_image.max() == 0:
         markers_image, _ = ndi.label(foreground)
 
-    # Negative distance makes object centres low in the elevation landscape.
-    # Boundary probability raises the elevation at predicted inter-cell borders.
-    elevation = - distance + boundary_weight * boundary_probability
+    # Combine distance and predicted boundary information.
+    elevation = -distance + boundary_weight * smooth_boundary
 
+    # Initial watershed segmentation.
     labels = watershed(
         elevation,
         markers=markers_image,
         mask=foreground,
-        watershed_line=True
+        watershed_line=False,
+    ).astype(np.int32)
+
+    # ---------------------------------------------------------
+    # Merge neighbouring instances separated by weak boundaries
+    # ---------------------------------------------------------
+
+    parent = np.arange(labels.max() + 1, dtype=np.int32)
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        root_a = find(a)
+        root_b = find(b)
+
+        if root_a != root_b:
+            parent[root_b] = root_a
+
+    # Collect boundary scores for neighbouring instance pairs.
+    pair_scores = {}
+
+    def collect_pairs(label_a, label_b, boundary_a, boundary_b):
+        valid = (
+            (label_a > 0)
+            & (label_b > 0)
+            & (label_a != label_b)
+        )
+
+        if not np.any(valid):
+            return
+
+        ids_a = label_a[valid]
+        ids_b = label_b[valid]
+
+        scores = np.maximum(
+            boundary_a[valid],
+            boundary_b[valid],
+        )
+
+        for a, b, score in zip(ids_a, ids_b, scores):
+            pair = tuple(sorted((int(a), int(b))))
+            pair_scores.setdefault(pair, []).append(float(score))
+
+    # Horizontal neighbours.
+    collect_pairs(
+        labels[:, :-1],
+        labels[:, 1:],
+        smooth_boundary[:, :-1],
+        smooth_boundary[:, 1:],
     )
 
-    return labels.astype(np.int32)
+    # Vertical neighbours.
+    collect_pairs(
+        labels[:-1, :],
+        labels[1:, :],
+        smooth_boundary[:-1, :],
+        smooth_boundary[1:, :],
+    )
+
+    # Merge regions whose shared boundary is weak.
+    for (label_a, label_b), scores in pair_scores.items():
+        mean_boundary_score = np.mean(scores)
+
+        if mean_boundary_score < boundary_threshold:
+            union(label_a, label_b)
+
+    # ---------------------------------------------------------
+    # Relabel instances consecutively: 1, 2, 3, ...
+    # ---------------------------------------------------------
+
+    merged = np.zeros_like(labels, dtype=np.int32)
+    root_to_new_id = {}
+
+    for old_id in np.unique(labels):
+        if old_id == 0:
+            continue
+
+        root = find(int(old_id))
+
+        if root not in root_to_new_id:
+            root_to_new_id[root] = len(root_to_new_id) + 1
+
+        merged[labels == old_id] = root_to_new_id[root]
+
+    return merged
 
 def instance_metrics(true_mask, pred_mask, iou_threshold=0.5):
     """
@@ -379,8 +482,25 @@ def main():
                     else checkpoint.get("min_distance", MIN_DISTANCE))
     boundary_weight = (BOUNDARY_WEIGHT_OVERRIDE if BOUNDARY_WEIGHT_OVERRIDE is not None
                        else checkpoint.get("boundary_weight", BOUNDARY_WEIGHT))
-    print(f"Loaded epoch {checkpoint.get('epoch', '?')} | threshold={cell_threshold} | "
-          f"min_distance={min_distance} | boundary_weight={boundary_weight}")
+    boundary_threshold = (
+                        BOUNDARY_THRESHOLD_OVERRIDE
+                        if BOUNDARY_THRESHOLD_OVERRIDE is not None
+                        else checkpoint.get("boundary_threshold", BOUNDARY_THRESHOLD)
+                            )
+
+    boundary_smoothing = (
+        BOUNDARY_SMOOTHING_OVERRIDE
+        if BOUNDARY_SMOOTHING_OVERRIDE is not None
+        else checkpoint.get("boundary_smoothing", BOUNDARY_SMOOTHING)
+    )
+    print(
+    f"Loaded epoch {checkpoint.get('epoch', '?')} | "
+    f"cell_threshold={cell_threshold} | "
+    f"min_distance={min_distance} | "
+    f"boundary_weight={boundary_weight} | "
+    f"boundary_threshold={boundary_threshold} | "
+    f"boundary_smoothing={boundary_smoothing}"
+            )
 
     with open("access.txt", encoding="utf-8") as file:
         content = [line.strip() for line in file]
@@ -424,11 +544,14 @@ def main():
                     cell_probability, boundary_probability = probability_pair
                     binary_mask = cell_probability >= cell_threshold
                     instance_mask = watershed_instances(
-                        cell_probability, boundary_probability,
-                        cell_threshold=cell_threshold,
-                        min_distance=min_distance,
-                        boundary_weight=boundary_weight
-                    )
+                                    cell_probability,
+                                    boundary_probability,
+                                    cell_threshold=cell_threshold,
+                                    min_distance=min_distance,
+                                    boundary_weight=boundary_weight,
+                                    boundary_threshold=boundary_threshold,
+                                    boundary_smoothing=boundary_smoothing,
+                                ) 
                     stem = f"frame_{frame_idx:04d}"
                     if SAVE_PROBABILITY_MAPS:
                         tiff.imwrite(recording_output / f"{stem}_cell_probability.tif",
