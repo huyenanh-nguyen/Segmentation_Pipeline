@@ -27,8 +27,8 @@ from scipy.optimize import linear_sum_assignment
 
 from DataProcessing.background import Background
 
-CHECKPOINT_PATH = Path.cwd() / "unet_models" / "unet_instance_best.pth"
-PREDICTION_DIR = Path.cwd() / "unet_predictions_watershed"
+CHECKPOINT_PATH = Path.cwd() / "unet_models" / "unet_instance_best_pt2.pth"
+PREDICTION_DIR = Path.cwd() / "unet_predictions_watershed_pt2"
 ANNOTATION_DIR = Path.cwd() / "cellpose_training"
 BATCH_SIZE = 2
 SAVE_PROBABILITY_MAPS = True

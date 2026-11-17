@@ -10,7 +10,10 @@ Requires the existing DataProcessing/background.py and U-Net checkpoint.
 
 from pathlib import Path
 import csv
-
+import re
+from skimage.feature import peak_local_max
+from skimage.segmentation import watershed, find_boundaries
+from scipy.optimize import linear_sum_assignment
 import cv2
 import matplotlib
 matplotlib.use("Agg")
@@ -22,9 +25,6 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from scipy import ndimage as ndi
-from scipy.optimize import linear_sum_assignment
-from skimage.feature import peak_local_max
-from skimage.segmentation import watershed, find_boundaries
 
 from DataProcessing.background import Background
 
@@ -35,7 +35,17 @@ from DataProcessing.background import Background
 
 CHECKPOINT_PATH = Path.cwd() / "unet_models" / "unet_instance_best.pth"
 OUTPUT_DIR = Path.cwd() / "unet_predictions_tracked"
-ACCESS_FILE = Path.cwd() / "access.txt"
+
+# Project folders. No access.txt is used:
+#   Path.cwd()/Data  -> ND2 recordings (plus unrelated files such as darkfield TIFFs)
+#   Path.cwd()/masks -> original ImageJ ROI/ZIP annotation files
+DATA_DIR = Path.cwd() / "Data"
+ROI_DIR = Path.cwd() / "masks"
+
+# Optional: exported TIFF masks from the original training preparation.
+# Tracking inference does not require these TIFFs. If this folder exists and
+# contains recording subfolders with frame TIFFs, they are loaded for validation.
+ANNOTATION_TIFF_DIR = Path.cwd() / "cellpose_training"
 
 BASE_CHANNELS = 32
 CELL_THRESHOLD = 0.50
@@ -159,34 +169,198 @@ def normalize(image):
 
 
 def find_nd2_files():
-    if not ACCESS_FILE.is_file():
-        raise FileNotFoundError(f"Missing {ACCESS_FILE}")
-    with ACCESS_FILE.open(encoding="utf-8") as f:
-        content = [line.strip() for line in f]
-    if len(content) < 2 or not content[1]:
-        raise ValueError("ND2 directory must be on line 2 of access.txt (content[1]).")
-    raw = Path(content[1]).expanduser()
-    directory = raw if raw.is_absolute() else Path.cwd() / raw
-    files = sorted(directory.resolve().glob("*.nd2"))
+    """
+    Find ND2 recordings only in the project Data folder.
+
+    Other files may be present in Data (e.g. darkfield TIFFs); they are
+    deliberately ignored. No access.txt is read.
+    """
+    data_directory = DATA_DIR
+
+    if not data_directory.is_dir():
+        raise FileNotFoundError(
+            f"Data directory does not exist: {data_directory}. "
+            "Run this script from the project root containing the Data folder."
+        )
+
+    files = sorted(
+        path for path in data_directory.iterdir()
+        if path.is_file() and path.suffix.lower() == ".nd2"
+    )
+
     if not files:
-        raise FileNotFoundError(f"No ND2 files found in {directory.resolve()}")
+        raise FileNotFoundError(
+            f"No .nd2 recordings found directly inside: {data_directory}"
+        )
+
+    print(f"Found {len(files)} ND2 recording(s) in: {data_directory}")
+    for path in files:
+        print(f"  - {path.name}")
+
     return files
 
 
-def read_corrected_frames(path):
-    # Same darkfield correction call as in the existing inference script.
-    corrected = Background().darkfield_assignment(path)[0]["raw_minus_dark"]
-    frames = np.asarray(corrected, dtype=np.float32)
-    if frames.ndim == 2:
-        frames = frames[None]
-    if frames.ndim == 4 and frames.shape[1] == 1:
-        frames = frames[:, 0]
-    if frames.ndim != 3:
-        raise ValueError(
-            f"{path.name}: expected (T,H,W), got {frames.shape}. "
-            "Select the same single channel used during training."
+def load_recording_data(nd2_files):
+    """
+    Return data[recording_stem] = darkfield-corrected (T,H,W) float32.
+
+    Only the ND2 paths returned by find_nd2_files() are passed to nd2.imread
+    and Background().darkfield_assignment(). Other files in Data are ignored.
+    """
+    data = {}
+    background = Background()
+
+    for file in nd2_files:
+        print(f"Loading ND2 recording: {file.name}")
+
+        # Preserve the original data-loading step.
+        raw = nd2.imread(file).astype(np.float32)
+
+        # Use the corrected image sequence, as in the original Cellpose code.
+        corrected = background.darkfield_assignment(file)[0]["raw_minus_dark"]
+        frames = np.asarray(corrected, dtype=np.float32)
+
+        if frames.ndim == 2:
+            frames = frames[None, :, :]
+        elif frames.ndim == 4 and frames.shape[1] == 1:
+            frames = frames[:, 0, :, :]
+
+        if frames.ndim != 3:
+            raise ValueError(
+                f"{file.name}: corrected data has shape {frames.shape}; "
+                "expected (T,H,W). Select the same channel used for U-Net training."
+            )
+
+        data[file.stem] = frames
+        del raw
+
+        print(f"  {file.stem}: {frames.shape}, dtype={frames.dtype}")
+
+    return data
+
+
+def collect_roi_source_files():
+    """
+    Collect original ImageJ annotation files from Path.cwd()/masks.
+
+    Expected structure:
+        masks/
+            recording_A/
+                *.roi or *.zip
+            recording_B/
+                *.roi or *.zip
+
+    These source files are not converted during tracking. They are retained
+    as annotation references; the temporal tracking algorithm creates IDs
+    from model predictions.
+    """
+    roi_directory = ROI_DIR
+
+    if not roi_directory.is_dir():
+        raise FileNotFoundError(
+            f"ROI directory does not exist: {roi_directory}. "
+            "Expected a masks folder next to run_tracking.py."
         )
-    return frames
+
+    maskpath = [
+        folder for folder in roi_directory.iterdir()
+        if folder.is_dir()
+    ]
+    mask_files = {
+        folder.name: sorted(folder.glob("*"))
+        for folder in maskpath
+    }
+
+    print(f"Found {len(mask_files)} ROI annotation folder(s) in: {roi_directory}")
+    for name, files in mask_files.items():
+        print(f"  - {name}: {len(files)} file(s)")
+
+    return roi_directory, mask_files
+
+
+def load_optional_tiff_annotations(data):
+    """
+    Optionally load already-exported TIFF masks from ANNOTATION_TIFF_DIR.
+
+    This is only for validation against the recordings. The tracking inference
+    does not depend on these TIFFs. Original ROI/ZIP files remain in masks/.
+    """
+    if not ANNOTATION_TIFF_DIR.is_dir():
+        print(
+            f"No exported TIFF annotation directory found at "
+            f"{ANNOTATION_TIFF_DIR}; skipping TIFF annotation validation."
+        )
+        return {}, {}
+
+    annotation = {}
+    frameindex = {}
+
+    for folder in ANNOTATION_TIFF_DIR.iterdir():
+        if not folder.is_dir():
+            continue
+
+        listholder = {}
+        placeholder = []
+
+        for mask_file in folder.glob("*.tif*"):
+            match = re.search(
+                r"(\\d+)\\.tif{1,2}$",
+                mask_file.name,
+                flags=re.IGNORECASE
+            )
+            if match is None:
+                print(f"Skipping non-frame TIFF: {mask_file.name}")
+                continue
+
+            frame = int(match.group(1))
+            mask = np.squeeze(tiff.imread(mask_file))
+
+            if mask.ndim != 2:
+                raise ValueError(
+                    f"{mask_file} has shape {mask.shape}; expected a 2D mask."
+                )
+
+            listholder[frame] = (mask > 0).astype(np.float32)
+            placeholder.append(frame)
+
+        if listholder:
+            annotation[folder.name] = listholder
+            frameindex[folder.name] = sorted(placeholder)
+
+    # Validate only if TIFF annotations were found.
+    for key, frames in frameindex.items():
+        if key not in data:
+            raise KeyError(
+                f"TIFF annotation folder '{key}' has no matching ND2 file "
+                f"basename. Expected folder name to match file.stem."
+            )
+
+        for frame_idx in frames:
+            if frame_idx >= len(data[key]):
+                raise IndexError(
+                    f"{key}: mask frame {frame_idx} exceeds ND2 frame range "
+                    f"(0..{len(data[key]) - 1})."
+                )
+
+            if data[key][frame_idx].shape != annotation[key][frame_idx].shape:
+                raise ValueError(
+                    f"{key}, frame {frame_idx}: ND2 image shape "
+                    f"{data[key][frame_idx].shape} does not match TIFF mask "
+                    f"shape {annotation[key][frame_idx].shape}."
+                )
+
+    if annotation:
+        print(
+            f"Loaded optional TIFF annotations for {len(annotation)} recording(s) "
+            f"from {ANNOTATION_TIFF_DIR}"
+        )
+    else:
+        print(
+            f"No frame TIFF annotations found in {ANNOTATION_TIFF_DIR}; "
+            "continuing without annotation validation."
+        )
+
+    return annotation, frameindex
 
 
 # ---------------------------------------------------------------------
@@ -204,12 +378,22 @@ def warp_previous_labels(previous_image, current_image, previous_labels):
     prev8 = to_uint8(previous_image)
     curr8 = to_uint8(current_image)
 
-    # Current -> previous flow lets remap sample the previous label image
-    # at the source location corresponding to each current-frame pixel.
-    flow = cv2.calcOpticalFlowFarneback(
+    # Contiguous single-channel uint8 inputs are expected by OpenCV.
+    curr8 = np.ascontiguousarray(curr8, dtype=np.uint8)
+    prev8 = np.ascontiguousarray(prev8, dtype=np.uint8)
+
+    # Use OpenCV's standard None initial-flow argument. getattr avoids a
+    # conflicting overload in some generated Pylance OpenCV stubs.
+    farneback = getattr(cv2, "calcOpticalFlowFarneback")
+    flow = farneback(
         curr8, prev8, None,
-        FLOW_PYR_SCALE, FLOW_LEVELS, FLOW_WINSIZE,
-        FLOW_ITERATIONS, FLOW_POLY_N, FLOW_POLY_SIGMA, 0
+        float(FLOW_PYR_SCALE),
+        int(FLOW_LEVELS),
+        int(FLOW_WINSIZE),
+        int(FLOW_ITERATIONS),
+        int(FLOW_POLY_N),
+        float(FLOW_POLY_SIGMA),
+        0,
     )
     h, w = current_image.shape
     xx, yy = np.meshgrid(np.arange(w, dtype=np.float32),
@@ -458,10 +642,9 @@ def save_checkpoint_figure(image, cell_prob, boundary_prob, labels,
     plt.close(fig)
 
 
-def run_recording(nd2_path, model, device):
+def run_recording(nd2_path, frames, model, device):
     recording = nd2_path.stem
     print(f"\nProcessing {recording}", flush=True)
-    frames = read_corrected_frames(nd2_path)
 
     out = OUTPUT_DIR / recording
     mask_dir = out / "instance_masks"
@@ -551,14 +734,38 @@ def run_recording(nd2_path, model, device):
 
 
 def main():
-    model, device = load_model()
+    # Project layout:
+    #   ./Data  = ND2 recordings (other files are ignored)
+    #   ./masks = original ROI/ZIP annotation folders
+    # No access.txt is used.
     nd2_files = find_nd2_files()
+    roi_directory, mask_files = collect_roi_source_files()
+
+    # Darkfield-corrected recordings, using the existing preprocessing method.
+    data = load_recording_data(nd2_files)
+
+    # Optional TIFF annotations are only used for validation, never as track IDs.
+    annotation, frameindex = load_optional_tiff_annotations(data)
+
+    print(f"Original ROI/ZIP source directory: {roi_directory}")
+    print(
+        "Original ROI/ZIP files were located. They are not converted during "
+        "tracking and are not used as temporal track IDs."
+    )
+    if annotation:
+        print(
+            "Exported TIFF annotations were also loaded and checked against "
+            "the matching ND2 recordings."
+        )
+
+    model, device = load_model()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    for path in nd2_files:
-        run_recording(path, model, device)
+    for nd2_path in nd2_files:
+        recording = nd2_path.stem
+        run_recording(nd2_path, data[recording], model, device)
 
-    print(f"\nFinished. Results are in: {OUTPUT_DIR}")
+    print(f"\\nFinished. Results are in: {OUTPUT_DIR}")
 
 
 if __name__ == "__main__":

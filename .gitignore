@@ -13,6 +13,10 @@ pyproject.toml
 unet_instance_gif/
 unet_instance_stack/
 unet_predictions_watershed/
+unet_instance_gif_pt2/
+unet_instance_stack_pt2/
+unet_predictions_watershed_pt2/
+unet_predictions_tracked/
 temporal_unet_tracking_starter/
 /unet_gif
 access.txt

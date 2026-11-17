@@ -12,11 +12,11 @@ from PIL import Image
 BASE_DIR = Path.cwd()
 
 # Input folder created by the watershed inference script
-SOURCE_DIR = BASE_DIR / "unet_predictions_watershed"
+SOURCE_DIR = BASE_DIR / "unet_predictions_watershed_pt2"
 
 # Output folders
-STACK_DIR = BASE_DIR / "unet_instance_stack"
-GIF_DIR = BASE_DIR / "unet_instance_gif"
+STACK_DIR = BASE_DIR / "unet_instance_stack_pt2"
+GIF_DIR = BASE_DIR / "unet_instance_gif_pt2"
 
 GIF_FRAME_DURATION_MS = 100
 GIF_LOOP = 0
